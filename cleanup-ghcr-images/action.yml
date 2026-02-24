@@ -1,4 +1,4 @@
-name: Cleanup GHCR untagged images
+name: Clean up GHCR Images
 description: Delete untagged GHCR container images that have versions older than a retention window
 
 inputs:
@@ -6,7 +6,7 @@ inputs:
     description: GitHub token with package delete permissions
     required: true
   ghcr-package-name:
-    description: GHCR package name to clean
+    description: The GHCR package/image name to clean
     required: true
   retention-days:
     description: Number of days to keep untagged images
