@@ -1,0 +1,105 @@
+name: Cleanup GHCR untagged images
+description: Delete untagged GHCR container images that have versions older than a retention window
+
+inputs:
+  github-token:
+    description: GitHub token with package delete permissions
+    required: true
+  ghcr-package-name:
+    description: GHCR package name to clean
+    required: true
+  retention-days:
+    description: Number of days to keep untagged images
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Delete untagged GHCR images older than retention
+      uses: actions/github-script@v7
+      env:
+        GHCR_PACKAGE_NAME: ${{ inputs.ghcr-package-name }}
+        RETENTION_DAYS: ${{ inputs.retention-days }}
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const owner = context.repo.owner;
+          const ghcrPackageName = process.env.GHCR_PACKAGE_NAME;
+          const packageType = 'container';
+          const retentionDays = Number(process.env.RETENTION_DAYS || '3');
+          const cutoffMs = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+
+          if (!ghcrPackageName) {
+            core.setFailed('Missing required GHCR package name.');
+            return;
+          }
+
+          async function listVersions(scope) {
+            const versions = [];
+            let page = 1;
+
+            while (true) {
+              const route = scope === 'org'
+                ? 'GET /orgs/{org}/packages/{package_type}/{package_name}/versions'
+                : 'GET /users/{username}/packages/{package_type}/{package_name}/versions';
+
+              const params = scope === 'org'
+                ? { org: owner, package_type: packageType, package_name: ghcrPackageName, per_page: 100, page }
+                : { username: owner, package_type: packageType, package_name: ghcrPackageName, per_page: 100, page };
+
+              let response;
+              try {
+                response = await github.request(route, params);
+              } catch (error) {
+                if (error.status === 404 && page === 1) {
+                  return null;
+                }
+                throw error;
+              }
+
+              const pageData = response.data || [];
+              if (!pageData.length) {
+                break;
+              }
+
+              versions.push(...pageData);
+              if (pageData.length < 100) {
+                break;
+              }
+              page += 1;
+            }
+
+            return versions;
+          }
+
+          const orgVersions = await listVersions('org');
+          const scope = orgVersions ? 'org' : 'user';
+          const versions = orgVersions || await listVersions('user') || [];
+
+          core.info(`Found ${versions.length} package versions in GHCR (${scope} scope).`);
+
+          let deleted = 0;
+          for (const version of versions) {
+            const tags = version?.metadata?.container?.tags || [];
+            const isUntagged = tags.length === 0;
+            const timestamp = Date.parse(version.updated_at || version.created_at || '');
+            const isOlderThanRetention = Number.isFinite(timestamp) && timestamp < cutoffMs;
+
+            if (!isUntagged || !isOlderThanRetention) {
+              continue;
+            }
+
+            const deleteRoute = scope === 'org'
+              ? 'DELETE /orgs/{org}/packages/{package_type}/{package_name}/versions/{package_version_id}'
+              : 'DELETE /users/{username}/packages/{package_type}/{package_name}/versions/{package_version_id}';
+
+            const deleteParams = scope === 'org'
+              ? { org: owner, package_type: packageType, package_name: ghcrPackageName, package_version_id: version.id }
+              : { username: owner, package_type: packageType, package_name: ghcrPackageName, package_version_id: version.id };
+
+            await github.request(deleteRoute, deleteParams);
+            deleted += 1;
+            core.info(`Deleted version id=${version.id} updated_at=${version.updated_at || version.created_at}`);
+          }
+
+          core.info(`Cleanup complete. Deleted ${deleted} untagged version(s) older than ${retentionDays} day(s).`);
